@@ -7,7 +7,14 @@ import { createClient } from "@supabase/supabase-js";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+    origin: [
+        "http://localhost:5500",
+        "https://safeguard.vercel.app"
+    ]
+}));
+  
 app.use(express.json());
 
 // Supabase connection
