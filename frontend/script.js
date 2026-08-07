@@ -1,6 +1,6 @@
 // ===================== CONFIG =====================
 // Point this at wherever server.js is running. Same-origin deploys can leave this as ''.
-const API_BASE = 'https://sos-ui-backend.onrender.com/api';
+const API_BASE = "https://sos-ui-backend.onrender.com/api";
 
 // ===================== AUTH TOGGLE =====================
 function showAuth(which) {
