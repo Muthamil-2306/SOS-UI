@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node server.js"
   },
-  
   "dependencies": {
     "@supabase/supabase-js": "^2.52.0",
     "bcryptjs": "^3.0.2",
@@ -16,7 +15,7 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0"
+    "morgan": "^1.10.0",
+    "twilio": "^5.13.1"
   }
 }
-
