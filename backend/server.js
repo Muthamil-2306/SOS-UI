@@ -2,54 +2,93 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import twilio from "twilio";
 import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 
+// ===================== CONFIG =====================
+const {
+  SUPABASE_URL,
+  SUPABASE_KEY,
+  JWT_SECRET,
+  FRONTEND_URL,
+  RESEND_API_KEY,
+  RESEND_FROM_EMAIL,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER,
+  TWILIO_WHATSAPP_NUMBER,
+  PORT
+} = process.env;
+
+if (!SUPABASE_URL || !SUPABASE_KEY || !JWT_SECRET) {
+  console.error("❌ Missing required env vars: SUPABASE_URL, SUPABASE_KEY, JWT_SECRET");
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const twilioClient = (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN)
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+  : null;
+
+// ===================== MIDDLEWARE =====================
 app.use(cors({
-    origin: [
-        "http://localhost:5500",
-        "https://sos-ui.vercel.app"
-    ]
+  origin: FRONTEND_URL || "https://sos-ui.vercel.app", // set FRONTEND_URL in Render to override
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
-  
 app.use(express.json());
 
-// Supabase connection
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+// Consistent error responses
+function fail(res, status, message) {
+  return res.status(status).json({ success: false, error: message });
+}
 
-// ✅ Test route
+// JWT auth middleware — attaches req.user = { id, name, email }
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    return fail(res, 401, "Missing or invalid authorization header.");
+  }
+  const token = header.slice(7);
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    return fail(res, 401, "Session expired or invalid — please log in again.");
+  }
+}
+
+// ===================== HEALTH =====================
 app.get("/api/test", (req, res) => {
   res.json({ message: "✅ Backend is running with Supabase!" });
 });
+app.get("/", (req, res) => res.send("SafeGuard API is live."));
 
-// 👤 Register a user
-// Expects: { name, email, password }
-// users table: id, name, email (unique), password_hash, created_at
+// ===================== AUTH =====================
 app.post("/api/register", async (req, res) => {
   const { name, email, password } = req.body;
 
   if (!name || !email || !password) {
-    return res.status(400).json({ error: "Name, email and password are required." });
+    return fail(res, 400, "Name, email and password are required.");
   }
   if (password.length < 6) {
-    return res.status(400).json({ error: "Password must be at least 6 characters." });
+    return fail(res, 400, "Password must be at least 6 characters.");
   }
 
-  const { data: existing } = await supabase
+  const { data: existing, error: lookupErr } = await supabase
     .from("users")
     .select("id")
     .eq("email", email)
     .maybeSingle();
 
-  if (existing) {
-    return res.status(409).json({ error: "An account with this email already exists." });
-  }
+  if (lookupErr) return fail(res, 500, "Could not check existing accounts.");
+  if (existing) return fail(res, 409, "An account with this email already exists.");
 
   const password_hash = await bcrypt.hash(password, 10);
 
@@ -59,17 +98,15 @@ app.post("/api/register", async (req, res) => {
     .select("id, name, email")
     .single();
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) return fail(res, 400, error.message);
   res.json({ success: true, user: data });
 });
 
-// 🔑 Login a user
-// Expects: { email, password }
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required." });
+    return fail(res, 400, "Email and password are required.");
   }
 
   const { data: user, error } = await supabase
@@ -78,75 +115,176 @@ app.post("/api/login", async (req, res) => {
     .eq("email", email)
     .maybeSingle();
 
-  if (error) return res.status(400).json({ error: error.message });
-  if (!user) return res.status(401).json({ error: "Invalid email or password." });
+  if (error) return fail(res, 500, "Login lookup failed.");
+  if (!user) return fail(res, 401, "Invalid email or password.");
 
   const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(401).json({ error: "Invalid email or password." });
+  if (!valid) return fail(res, 401, "Invalid email or password.");
 
-  res.json({ success: true, user: { id: user.id, name: user.name, email: user.email } });
+  const token = jwt.sign(
+    { id: user.id, name: user.name, email: user.email },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
+  res.json({
+    success: true,
+    token,
+    user: { id: user.id, name: user.name, email: user.email }
+  });
 });
 
-// 🚨 Add SOS alert
-app.post("/api/sos", async (req, res) => {
-  const { user_id, message, location } = req.body;
-
+// ===================== CONTACTS (protected, user-scoped) =====================
+app.get("/api/contacts", requireAuth, async (req, res) => {
   const { data, error } = await supabase
-    .from("alerts")
-    .insert([{ user_id, message, location, timestamp: new Date().toISOString() }])
-    .select();
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ success: true, alert: data });
-});
-
-// 📜 Get alerts for a user
-app.get("/api/alerts/:user_id", async (req, res) => {
-  const { user_id } = req.params;
-
-  const { data, error } = await supabase
-    .from("alerts")
+    .from("contacts")
     .select("*")
-    .eq("user_id", user_id)
-    .order("timestamp", { ascending: false });
+    .eq("user_id", req.user.id);
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) return fail(res, 500, "Could not load contacts.");
   res.json(data);
 });
 
-// 👥 Add a contact
-// contacts table: id, user_id, contact_name, contact_number, contact_email, relation
-app.post("/api/contacts", async (req, res) => {
-  const { user_id, contact_name, contact_number, contact_email, relation } = req.body;
+app.post("/api/contacts", requireAuth, async (req, res) => {
+  const { contact_name, contact_number, contact_email, relation } = req.body;
 
-  if (!user_id || !contact_name || !contact_number) {
-    return res.status(400).json({ error: "user_id, contact_name and contact_number are required." });
+  if (!contact_name || !contact_number) {
+    return fail(res, 400, "Contact name and phone number are required.");
   }
 
   const { data, error } = await supabase
     .from("contacts")
-    .insert([{ user_id, contact_name, contact_number, contact_email, relation }])
+    .insert([{
+      user_id: req.user.id,
+      contact_name,
+      contact_number,
+      contact_email: contact_email || null,
+      relation: relation || null
+    }])
     .select();
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) return fail(res, 500, "Could not save contact.");
   res.json({ success: true, contact: data });
 });
 
-// 📜 Get contacts for a user
-app.get("/api/contacts/:user_id", async (req, res) => {
-  const { user_id } = req.params;
+// ===================== SOS =====================
+app.post("/api/sos", requireAuth, async (req, res) => {
+  const { message, location } = req.body;
 
-  const { data, error } = await supabase
+  if (!location) return fail(res, 400, "Location is required to send an SOS.");
+
+  const finalMessage = message || "Emergency SOS! I need help.";
+
+  const { data: alert, error } = await supabase
+    .from("alerts")
+    .insert([{
+      user_id: req.user.id,
+      message: finalMessage,
+      location,
+      timestamp: new Date().toISOString()
+    }])
+    .select()
+    .single();
+
+  if (error) return fail(res, 500, "Could not record SOS alert.");
+
+  // Respond immediately — don't make the person wait on notification delivery
+  res.json({ success: true, alert });
+
+  // Fire-and-forget notifications to trusted contacts
+  const { data: contacts } = await supabase
     .from("contacts")
-    .select("*")
-    .eq("user_id", user_id);
+    .select("contact_name, contact_number, contact_email")
+    .eq("user_id", req.user.id);
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (contacts && contacts.length) {
+    notifyContacts(contacts, req.user, finalMessage, location).catch(err =>
+      console.error("Notification dispatch error:", err.message)
+    );
+  }
+});
+
+// ===================== ALERT HISTORY (protected) =====================
+app.get("/api/alerts", requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from("alerts")
+    .select("*")
+    .eq("user_id", req.user.id)
+    .order("timestamp", { ascending: false })
+    .limit(50);
+
+  if (error) return fail(res, 500, "Could not load alert history.");
   res.json(data);
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+// ===================== NOTIFICATIONS =====================
+async function notifyContacts(contacts, user, message, location) {
+  const mapsLink = `https://maps.google.com/?q=${location}`;
+  const results = [];
+
+  for (const c of contacts) {
+    if (c.contact_email) results.push(sendEmail(c, user, message, mapsLink));
+    if (c.contact_number) {
+      results.push(sendSMS(c, user, message, mapsLink));
+      results.push(sendWhatsApp(c, user, message, mapsLink));
+    }
+  }
+
+  await Promise.allSettled(results);
+}
+
+async function sendEmail(contact, user, message, mapsLink) {
+  if (!RESEND_API_KEY) return;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: RESEND_FROM_EMAIL || "SafeGuard <onboarding@resend.dev>",
+        to: [contact.contact_email],
+        subject: `🚨 SOS Alert from ${user.name}`,
+        html: `<p><strong>${user.name}</strong> has triggered an emergency SOS alert.</p>
+               <p>${message}</p>
+               <p><a href="${mapsLink}">View live location on Google Maps</a></p>`
+      })
+    });
+    if (!res.ok) console.error("Resend email failed:", await res.text());
+  } catch (err) {
+    console.error("Email send error:", err.message);
+  }
+}
+
+async function sendSMS(contact, user, message, mapsLink) {
+  if (!twilioClient || !TWILIO_PHONE_NUMBER) return;
+  try {
+    await twilioClient.messages.create({
+      from: TWILIO_PHONE_NUMBER,
+      to: contact.contact_number,
+      body: `🚨 SOS from ${user.name}: ${message} Location: ${mapsLink}`
+    });
+  } catch (err) {
+    console.error("SMS send error:", err.message);
+  }
+}
+
+async function sendWhatsApp(contact, user, message, mapsLink) {
+  if (!twilioClient || !TWILIO_WHATSAPP_NUMBER) return;
+  try {
+    await twilioClient.messages.create({
+      from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+      to: `whatsapp:${contact.contact_number}`,
+      body: `🚨 SOS from ${user.name}: ${message} Location: ${mapsLink}`
+    });
+  } catch (err) {
+    console.error("WhatsApp send error:", err.message);
+  }
+}
+
+// ===================== START =====================
+const port = PORT || 5000;
+app.listen(port, () => {
+  console.log(`🚀 SafeGuard backend running on port ${port}`);
 });

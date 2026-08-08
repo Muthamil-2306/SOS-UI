@@ -1,6 +1,55 @@
 // ===================== CONFIG =====================
-// Point this at wherever server.js is running. Same-origin deploys can leave this as ''.
-const API_BASE = "https://sos-ui-backend.onrender.com/api";
+// Point this at wherever server.js is running.
+const API_BASE = 'https://sos-ui-backend.onrender.com/api';
+
+// ===================== TOAST (replaces alert() popups) =====================
+function toast(message, type = 'info') {
+  let container = document.getElementById('toastContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toastContainer';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = message;
+  container.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 250);
+  }, 3800);
+}
+
+// ===================== AUTH TOKEN HELPERS =====================
+function getToken() { return localStorage.getItem('authToken'); }
+function authHeaders() {
+  const token = getToken();
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+}
+
+// Wrapper around fetch for protected endpoints — handles expired/invalid sessions centrally
+async function apiFetch(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...(options.headers || {})
+    }
+  });
+
+  if (res.status === 401) {
+    toast('Your session expired — please sign in again.', 'error');
+    logout();
+    throw new Error('Session expired.');
+  }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+  return data;
+}
 
 // ===================== AUTH TOGGLE =====================
 function showAuth(which) {
@@ -19,22 +68,10 @@ function register() {
   const errorBox = document.getElementById('regError');
   errorBox.textContent = '';
 
-  if (!name || !email || !pass || !confirm) {
-    errorBox.textContent = 'All fields are required.';
-    return;
-  }
-  if (!email.includes('@')) {
-    errorBox.textContent = 'Enter a valid email address.';
-    return;
-  }
-  if (pass.length < 6) {
-    errorBox.textContent = 'Password must be at least 6 characters.';
-    return;
-  }
-  if (pass !== confirm) {
-    errorBox.textContent = 'Passwords do not match.';
-    return;
-  }
+  if (!name || !email || !pass || !confirm) return errorBox.textContent = 'All fields are required.';
+  if (!email.includes('@')) return errorBox.textContent = 'Enter a valid email address.';
+  if (pass.length < 6) return errorBox.textContent = 'Password must be at least 6 characters.';
+  if (pass !== confirm) return errorBox.textContent = 'Passwords do not match.';
 
   fetch(`${API_BASE}/register`, {
     method: 'POST',
@@ -53,7 +90,7 @@ function register() {
       document.getElementById('regConfirm').value = '';
       showAuth('login');
       document.getElementById('loginEmail').value = email;
-      document.getElementById('loginError').textContent = 'Account created — sign in below.';
+      toast('Account created — sign in below.', 'success');
     })
     .catch(err => { errorBox.textContent = err.message; });
 }
@@ -65,10 +102,7 @@ function login() {
   const errorBox = document.getElementById('loginError');
   errorBox.textContent = '';
 
-  if (!email || !pass) {
-    errorBox.textContent = 'Email and password are required.';
-    return;
-  }
+  if (!email || !pass) return errorBox.textContent = 'Email and password are required.';
 
   fetch(`${API_BASE}/login`, {
     method: 'POST',
@@ -81,7 +115,7 @@ function login() {
       return data;
     })
     .then(data => {
-      localStorage.setItem('currentUserId', data.user.id);
+      localStorage.setItem('authToken', data.token);
       localStorage.setItem('currentUserName', data.user.name);
       enterApp(data.user.name);
     })
@@ -94,10 +128,11 @@ function enterApp(name) {
   document.getElementById('welcomeUser').textContent = name;
   document.getElementById('userName').value = name;
   renderContacts();
+  loadAlertHistory();
 }
 
 function logout() {
-  localStorage.removeItem('currentUserId');
+  localStorage.removeItem('authToken');
   localStorage.removeItem('currentUserName');
   document.getElementById('appSection').classList.add('hidden');
   document.getElementById('authSection').classList.remove('hidden');
@@ -106,15 +141,16 @@ function logout() {
 
 // Resume session on reload
 window.addEventListener('DOMContentLoaded', () => {
-  const uid = localStorage.getItem('currentUserId');
+  const token = getToken();
   const name = localStorage.getItem('currentUserName');
-  if (uid && name) enterApp(name);
+  if (token && name) enterApp(name);
 });
 
 // ===================== TAB SWITCHING =====================
 function showTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-panel').forEach(s => s.classList.toggle('active', s.id === tab));
+  if (tab === 'history') loadAlertHistory();
 }
 
 // ===================== SOS (press-and-hold) =====================
@@ -125,7 +161,7 @@ let sosAnimFrame = null;
 
 const sosBtn = () => document.getElementById('sosBtn');
 const sosRingFill = () => document.getElementById('sosRingFill');
-const RING_CIRCUMFERENCE = 2 * Math.PI * 90; // matches r=90 in SVG
+const RING_CIRCUMFERENCE = 2 * Math.PI * 90;
 
 function sosPressStart(e) {
   e.preventDefault();
@@ -136,14 +172,10 @@ function sosPressStart(e) {
     const elapsed = Date.now() - sosStartTime;
     const progress = Math.min(elapsed / SOS_HOLD_MS, 1);
     sosRingFill().style.strokeDashoffset = RING_CIRCUMFERENCE * (1 - progress);
-    if (progress < 1) {
-      sosAnimFrame = requestAnimationFrame(tick);
-    }
+    if (progress < 1) sosAnimFrame = requestAnimationFrame(tick);
   };
   sosAnimFrame = requestAnimationFrame(tick);
-  sosHoldTimer = setTimeout(() => {
-    fireSOS();
-  }, SOS_HOLD_MS);
+  sosHoldTimer = setTimeout(fireSOS, SOS_HOLD_MS);
 }
 
 function sosPressEnd() {
@@ -179,30 +211,42 @@ function fireSOS() {
 
   if (!navigator.geolocation) {
     logAlert('Geolocation not supported on this device.');
+    toast('This device does not support location sharing.', 'error');
     return;
   }
 
-  navigator.geolocation.getCurrentPosition(pos => {
-    const lat = pos.coords.latitude, lon = pos.coords.longitude;
-    const link = `https://maps.google.com/?q=${lat},${lon}`;
-    document.getElementById('location').innerHTML =
-      `<svg width="13" height="13"><use href="#icon-pin"/></svg><a href="${link}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`;
-    logAlert('SOS sent with current location.');
+  // High-accuracy GPS: forces the device to use GPS chip over network/wifi triangulation where possible
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
+      const accuracy = Math.round(pos.coords.accuracy);
+      const link = `https://maps.google.com/?q=${lat},${lon}`;
+      document.getElementById('location').innerHTML =
+        `<svg width="13" height="13"><use href="#icon-pin"/></svg><a href="${link}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a> <span class="accuracy-tag">±${accuracy}m</span>`;
+      logAlert(`SOS sent — location accurate to ${accuracy}m.`);
 
-    const user_id = localStorage.getItem('currentUserId');
-    const message = document.getElementById('sosMessage').value || 'Emergency SOS!';
+      const message = document.getElementById('sosMessage').value || 'Emergency SOS!';
 
-    fetch(`${API_BASE}/sos`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id, location: `${lat},${lon}`, message })
-    })
-      .then(res => res.json())
-      .then(() => logAlert('Alert delivered to server.'))
-      .catch(() => logAlert('Could not reach server — alert saved locally only.'));
-  }, () => {
-    logAlert('Location permission denied. SOS sent without location.');
-  });
+      apiFetch('/sos', {
+        method: 'POST',
+        body: JSON.stringify({ location: `${lat},${lon}`, message })
+      })
+        .then(() => {
+          logAlert('Alert delivered — trusted contacts notified.');
+          toast('SOS sent to your trusted contacts.', 'success');
+          loadAlertHistory();
+        })
+        .catch(err => {
+          logAlert('Could not reach server — please call helplines directly if needed.');
+          toast(err.message, 'error');
+        });
+    },
+    () => {
+      logAlert('Location permission denied. SOS sent without location.');
+      toast('Location permission denied — please enable it for accurate alerts.', 'error');
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  );
 }
 
 function dial(num) { window.location.href = `tel:${num}`; }
@@ -215,44 +259,65 @@ function logAlert(msg) {
   log.innerHTML = `<div>[${time}] ${msg}</div>` + log.innerHTML;
 }
 
+// ===================== ALERT HISTORY =====================
+function loadAlertHistory() {
+  const list = document.getElementById('historyList');
+  if (!list || !getToken()) return;
+
+  apiFetch('/alerts')
+    .then(alerts => {
+      if (!alerts.length) {
+        list.innerHTML = `<div class="empty-state"><svg width="28" height="28"><use href="#icon-empty"/></svg>No alerts sent yet.</div>`;
+        return;
+      }
+      list.innerHTML = alerts.map(a => {
+        const date = new Date(a.timestamp);
+        const link = `https://maps.google.com/?q=${a.location}`;
+        return `
+          <div class="history-card">
+            <div class="history-time">${date.toLocaleDateString()} · ${date.toLocaleTimeString()}</div>
+            <div class="history-message">${a.message || 'Emergency SOS'}</div>
+            ${a.location ? `<a class="history-loc" href="${link}" target="_blank" rel="noopener"><svg width="12" height="12"><use href="#icon-pin"/></svg>View location</a>` : ''}
+          </div>`;
+      }).join('');
+    })
+    .catch(() => {
+      list.innerHTML = '<div class="empty-state">Could not load alert history.</div>';
+    });
+}
+
 // ===================== CONTACTS =====================
 function addContact() {
-  const contact = {
-    user_id: localStorage.getItem('currentUserId'),
-    contact_name: document.getElementById('cName').value.trim(),
-    contact_number: document.getElementById('cPhone').value.trim(),
-    contact_email: document.getElementById('cEmail').value.trim(),
-    relation: document.getElementById('cRelation').value.trim()
-  };
-  if (!contact.contact_name || !contact.contact_number) {
-    alert('Name and phone are required.');
+  const contact_name = document.getElementById('cName').value.trim();
+  const contact_number = document.getElementById('cPhone').value.trim();
+  const contact_email = document.getElementById('cEmail').value.trim();
+  const relation = document.getElementById('cRelation').value.trim();
+
+  if (!contact_name || !contact_number) {
+    toast('Name and phone are required.', 'error');
     return;
   }
-  fetch(`${API_BASE}/contacts`, {
+
+  apiFetch('/contacts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(contact)
+    body: JSON.stringify({ contact_name, contact_number, contact_email, relation })
   })
-    .then(res => res.json())
     .then(() => {
       ['cName', 'cPhone', 'cEmail', 'cRelation'].forEach(id => document.getElementById(id).value = '');
+      toast('Contact added.', 'success');
       renderContacts();
     })
-    .catch(() => alert('Could not save contact — check your connection.'));
+    .catch(err => toast(err.message, 'error'));
 }
 
 function renderContacts() {
-  const user_id = localStorage.getItem('currentUserId');
-  if (!user_id) return;
-  fetch(`${API_BASE}/contacts/${user_id}`)
-    .then(res => res.json())
+  const list = document.getElementById('contactList');
+  if (!getToken()) return;
+
+  apiFetch('/contacts')
     .then(contacts => {
-      const list = document.getElementById('contactList');
       if (!contacts.length) {
-        list.innerHTML = `<div class="empty-state">
-          <svg width="28" height="28"><use href="#icon-empty"/></svg>
-          No trusted contacts yet — add one above.
-        </div>`;
+        list.innerHTML = `<div class="empty-state"><svg width="28" height="28"><use href="#icon-empty"/></svg>No trusted contacts yet — add one above.</div>`;
         return;
       }
       list.innerHTML = contacts.map(c => `
@@ -273,7 +338,7 @@ function renderContacts() {
       `).join('');
     })
     .catch(() => {
-      document.getElementById('contactList').innerHTML = '<div class="empty-state">Could not load contacts.</div>';
+      list.innerHTML = '<div class="empty-state">Could not load contacts.</div>';
     });
 }
 
@@ -301,7 +366,7 @@ function startAudio() {
     mediaRecorder.start();
     document.getElementById('audioStartBtn').disabled = true;
     document.getElementById('audioStopBtn').disabled = false;
-  }).catch(() => alert('Microphone access denied or unavailable.'));
+  }).catch(() => toast('Microphone access denied or unavailable.', 'error'));
 }
 function stopAudio() {
   if (mediaRecorder) mediaRecorder.stop();
@@ -327,7 +392,7 @@ function startVideo() {
     videoRecorder.start();
     document.getElementById('videoStartBtn').disabled = true;
     document.getElementById('videoStopBtn').disabled = false;
-  }).catch(() => alert('Camera access denied or unavailable.'));
+  }).catch(() => toast('Camera access denied or unavailable.', 'error'));
 }
 function stopVideo() {
   if (videoRecorder) videoRecorder.stop();
